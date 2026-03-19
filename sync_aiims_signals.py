@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import warnings
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence
@@ -303,6 +304,13 @@ def write_synced_csv(output_path: Path, synced_df: pd.DataFrame) -> None:
         cleaned_df.to_csv(output_path, index=False)
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def format_time_ns_as_ist(time_ns: int) -> str:
+    return datetime.fromtimestamp(time_ns / 1e9, tz=IST).strftime("%d-%m-%Y %H:%M:%S.%f IST")
+
+
 def compute_sync_summary_row(
     device: DeviceBundle,
     device_prefix: str,
@@ -327,6 +335,9 @@ def compute_sync_summary_row(
     ppg_duration_sec = (int(ppg_time_ns[-1]) - int(ppg_time_ns[0])) / 1e9 if len(ppg_time_ns) > 1 else 0.0
     mapped_duration_sec = (int(mapped_ppg_time_ns[-1]) - int(mapped_ppg_time_ns[0])) / 1e9 if len(mapped_ppg_time_ns) > 1 else 0.0
 
+    ppg_anchor_times_ns = ppg_time_ns[np.asarray(ppg_anchor_indices, dtype=int)]
+    ecg_anchor_times_ns = ecg_time_ns[np.asarray(ecg_anchor_indices, dtype=int)]
+
     return {
         "device": device_prefix,
         "device_name": device.device_name,
@@ -345,9 +356,13 @@ def compute_sync_summary_row(
         "anchor_2_error_ms": float(anchor_error_ms[1]),
         "max_abs_anchor_error_ms": float(np.max(np.abs(anchor_error_ms))),
         "ppg_anchor_1": int(ppg_anchor_indices[0]),
+        "ppg_anchor_1_time_ist": format_time_ns_as_ist(int(ppg_anchor_times_ns[0])),
         "ppg_anchor_2": int(ppg_anchor_indices[1]),
+        "ppg_anchor_2_time_ist": format_time_ns_as_ist(int(ppg_anchor_times_ns[1])),
         "ecg_anchor_1": int(ecg_anchor_indices[0]),
+        "ecg_anchor_1_time_ist": format_time_ns_as_ist(int(ecg_anchor_times_ns[0])),
         "ecg_anchor_2": int(ecg_anchor_indices[1]),
+        "ecg_anchor_2_time_ist": format_time_ns_as_ist(int(ecg_anchor_times_ns[1])),
         "sync_success": bool(overlap_duration_sec > 0 and np.all(np.isfinite(anchor_error_ms))),
     }
 
