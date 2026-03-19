@@ -5,7 +5,7 @@ import argparse
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,15 @@ import pandas as pd
 
 FS_ECG = 200
 SYNC_SENSORS = ("metaData", "accelerometer", "gyroscope", "magnetometer")
+TIME_COLUMN_CANDIDATES = (
+    "time",
+    "timestamp",
+    "phoneTimestamp",
+    "sensorTimestampNs",
+    "sensorTimestamp",
+    "systemTimeNs",
+    "systemTime",
+)
 
 
 @dataclass
@@ -74,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Optional directory under which synced outputs are written. If set, each record is written to "
-            "<output_root>/<base_path_name>/sync instead of back into base_path/sync."
+            "<output_root>/<patient>/<record>/sync while preserving the original patient/record folder layout."
         ),
     )
     parser.add_argument(
@@ -220,6 +229,21 @@ def fit_linear_clock_map_from_anchors(
     }
 
 
+def infer_time_column(source_df: pd.DataFrame) -> str:
+    for candidate in TIME_COLUMN_CANDIDATES:
+        if candidate in source_df.columns and pd.api.types.is_numeric_dtype(source_df[candidate]):
+            return candidate
+
+    numeric_columns = [
+        column for column in source_df.columns if pd.api.types.is_numeric_dtype(source_df[column])
+    ]
+    if not numeric_columns:
+        source_name = source_df.attrs.get("source_path", "<in-memory dataframe>")
+        raise ValueError(f"Could not find a numeric time column in {source_name}")
+
+    return numeric_columns[0]
+
+
 def map_timebase_to_source_rel(target_time_ns: np.ndarray, map_info: dict) -> np.ndarray:
     target_time_rel = (np.asarray(target_time_ns, dtype=np.int64) - map_info["t_ref_ns"]) / 1e9
     return (target_time_rel - map_info["b_rel"]) / map_info["a"]
@@ -231,7 +255,7 @@ def resample_signal_to_ecg(
     map_info: dict,
     columns: Sequence[str],
 ) -> pd.DataFrame:
-    time_col = "time" if "time" in source_df.columns else source_df.columns[0]
+    time_col = infer_time_column(source_df)
     source_time_rel = (source_df[time_col].to_numpy(np.int64) - map_info["t_ref_ns"]) / 1e9
     source_query_rel = map_timebase_to_source_rel(ecg_time_ns, map_info)
 
@@ -246,12 +270,22 @@ def resample_signal_to_ecg(
 
 
 def pick_numeric_value_columns(df: pd.DataFrame) -> list[str]:
-    time_col = "time" if "time" in df.columns else df.columns[0]
+    time_col = infer_time_column(df)
     return [
         col
         for col in df.columns
         if col != time_col and pd.api.types.is_numeric_dtype(df[col])
     ]
+
+
+def resolve_sync_parent(record: RecordConfig, output_root: Path | None) -> Path:
+    if record.output_base_path is not None:
+        return record.output_base_path
+    if output_root is None:
+        return record.base_path
+
+    tail_parts = record.base_path.parts[-2:] if len(record.base_path.parts) >= 2 else record.base_path.parts
+    return output_root.joinpath(*tail_parts)
 
 
 def write_synced_csv(output_path: Path, synced_df: pd.DataFrame) -> None:
@@ -270,9 +304,7 @@ def sync_record(
 
     ecg_df = pd.read_csv(ecg_path)
     ecg_time_ns = ecg_df["time"].to_numpy(np.int64)
-    sync_parent = record.output_base_path or output_root or base_path
-    if output_root is not None and record.output_base_path is None:
-        sync_parent = output_root / base_path.name
+    sync_parent = resolve_sync_parent(record, output_root)
     sync_dir = sync_parent / "sync"
 
     if dry_run:
@@ -309,7 +341,7 @@ def sync_record(
         (device_1, map_device_1, "ppg1"),
         (device_2, map_device_2, "ppg2"),
     ]:
-        ppg_columns = [col for col in pick_numeric_value_columns(device.ppg_df) if col != "time"]
+        ppg_columns = pick_numeric_value_columns(device.ppg_df)
         if not ppg_columns:
             raise ValueError(f"No numeric PPG columns found in {device.ppg_path}")
         synced_ppg = resample_signal_to_ecg(device.ppg_df, ecg_time_ns, map_info, ppg_columns)
@@ -369,83 +401,6 @@ def sync_record(
         print(f"  wrote {written_file}")
 
     return written_files
-
-
-# -----------------------------------------------------------------------------
-# Visualization helpers from the notebook are intentionally kept here as a
-# reference, but commented out because the main goal is to store synced signals.
-# Uncomment and adapt if interactive diagnostic plots are needed later.
-# -----------------------------------------------------------------------------
-# import neurokit2 as nk
-# import plotly.graph_objects as go
-# import matplotlib.pyplot as plt
-# from scipy.signal import find_peaks
-#
-# def robust_ecg_guided_ppg_peaks(
-#     rpeak_indices,
-#     ppg_resampled,
-#     fs_ecg,
-#     min_delay=0.10,
-#     max_delay=0.46,
-#     min_prom_factor=0.25,
-#     min_distance_sec=0.08,
-# ):
-#     ppg_peak_indices = []
-#     matched_rpeaks = []
-#     min_s = int(min_delay * fs_ecg)
-#     max_s = int(max_delay * fs_ecg)
-#     min_distance = max(1, int(min_distance_sec * fs_ecg))
-#
-#     for r_idx in np.asarray(rpeak_indices, dtype=int):
-#         start_idx = r_idx + min_s
-#         end_idx = r_idx + max_s
-#         if start_idx < 0 or end_idx >= len(ppg_resampled):
-#             continue
-#         window = np.asarray(ppg_resampled[start_idx:end_idx], dtype=float)
-#         if len(window) < 5 or np.all(~np.isfinite(window)):
-#             continue
-#         amp = np.nanpercentile(window, 95) - np.nanpercentile(window, 5)
-#         min_prom = max(1e-6, float(min_prom_factor) * amp)
-#         cand, props = find_peaks(window, distance=min_distance, prominence=min_prom)
-#         if len(cand) == 0:
-#             continue
-#         prominences = props.get("prominences", np.zeros(len(cand), dtype=float))
-#         strong_mask = prominences >= np.nanmedian(prominences)
-#         if np.any(strong_mask):
-#             cand = cand[strong_mask]
-#         best = int(cand[0])
-#         ppg_idx = start_idx + best
-#         ptt = (ppg_idx - r_idx) / fs_ecg
-#         if min_delay <= ptt <= max_delay:
-#             ppg_peak_indices.append(ppg_idx)
-#             matched_rpeaks.append(r_idx)
-#
-#     return np.asarray(ppg_peak_indices, dtype=int), np.asarray(matched_rpeaks, dtype=int)
-#
-# def plot_ecg_ppg_windowed_comparison(
-#     ecg_time_ns,
-#     ecg_signal,
-#     ppg_before,
-#     ppg_after,
-#     fs_ecg,
-#     device_name,
-#     start_idx=None,
-#     start_time_sec=None,
-#     window_sec=30,
-# ):
-#     ecg_time_sec = (ecg_time_ns - ecg_time_ns[0]) / 1e9
-#     if start_idx is None:
-#         start_idx = int((start_time_sec or 0) * fs_ecg)
-#     start_idx = max(0, min(int(start_idx), len(ecg_signal) - 1))
-#     win_samples = max(1, int(window_sec * fs_ecg))
-#     end_idx = min(len(ecg_signal), start_idx + win_samples)
-#     x = ecg_time_sec[start_idx:end_idx]
-#     fig = go.Figure()
-#     fig.add_trace(go.Scatter(x=x, y=ecg_signal[start_idx:end_idx], mode='lines', name='ECG'))
-#     fig.add_trace(go.Scatter(x=x, y=ppg_before[start_idx:end_idx], mode='lines', name='PPG before'))
-#     fig.add_trace(go.Scatter(x=x, y=ppg_after[start_idx:end_idx], mode='lines', name='PPG after'))
-#     fig.update_layout(title=f"{device_name} sync check", template='plotly_white')
-#     fig.show()
 
 
 def main() -> None:
