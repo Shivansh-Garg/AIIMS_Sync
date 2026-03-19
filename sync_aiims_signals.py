@@ -293,13 +293,13 @@ def resolve_sync_parent(record: RecordConfig, output_root: Path | None) -> Path:
 
 def write_synced_csv(output_path: Path, synced_df: pd.DataFrame) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cleaned_df = synced_df.replace([np.inf, -np.inf], np.nan)
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
-            message="invalid value encountered in cast",
+            message=r".*invalid value encountered in cast.*",
             category=RuntimeWarning,
         )
+        cleaned_df = synced_df.replace([np.inf, -np.inf], np.nan)
         cleaned_df.to_csv(output_path, index=False)
 
 
@@ -364,11 +364,12 @@ def sync_record(
     ecg_df = pd.read_csv(ecg_path)
     ecg_time_ns = ecg_df["time"].to_numpy(np.int64)
     sync_parent = resolve_sync_parent(record, output_root)
-    sync_dir = sync_parent / "sync"
+    summary_output_dir = sync_parent / "sync"
 
     if dry_run:
         print(f"[DRY RUN] {base_path}")
-        print(f"  Output: {sync_dir}")
+        print(f"  Output summary dir: {summary_output_dir}")
+        print(f"  Device output dirs: {sync_parent} / <device_name>")
         print(f"  ECG:  {ecg_path}")
         print(f"  PPG1: {ppg1_path}")
         print(f"  PPG2: {ppg2_path}")
@@ -392,7 +393,7 @@ def sync_record(
         record.ecg_anchor_indices,
     )
 
-    sync_dir.mkdir(parents=True, exist_ok=True)
+    summary_output_dir.mkdir(parents=True, exist_ok=True)
 
     written_files: list[Path] = []
 
@@ -400,11 +401,12 @@ def sync_record(
         (device_1, map_device_1, "ppg1"),
         (device_2, map_device_2, "ppg2"),
     ]:
+        device_output_dir = sync_parent / device.device_name
         ppg_columns = pick_numeric_value_columns(device.ppg_df)
         if not ppg_columns:
             raise ValueError(f"No numeric PPG columns found in {device.ppg_path}")
         synced_ppg = resample_signal_to_ecg(device.ppg_df, ecg_time_ns, map_info, ppg_columns)
-        ppg_output = sync_dir / f"{prefix}_synced_ppg.csv"
+        ppg_output = device_output_dir / f"{prefix}_synced_ppg.csv"
         write_synced_csv(ppg_output, synced_ppg)
         written_files.append(ppg_output)
 
@@ -412,7 +414,7 @@ def sync_record(
             meta_columns = pick_numeric_value_columns(device.meta_df)
             if meta_columns:
                 synced_meta = resample_signal_to_ecg(device.meta_df, ecg_time_ns, map_info, meta_columns)
-                meta_output = sync_dir / f"{prefix}_synced_metadata.csv"
+                meta_output = device_output_dir / f"{prefix}_synced_metadata.csv"
                 write_synced_csv(meta_output, synced_meta)
                 written_files.append(meta_output)
 
@@ -423,7 +425,7 @@ def sync_record(
             renamed_columns = [f"{sensor_name}_{col}_resampled" for col in sensor_columns]
             synced_sensor = resample_signal_to_ecg(sensor_df, ecg_time_ns, map_info, sensor_columns)
             synced_sensor.columns = ["time", *renamed_columns]
-            sensor_output = sync_dir / f"{prefix}_synced_{sensor_name}.csv"
+            sensor_output = device_output_dir / f"{prefix}_synced_{sensor_name}.csv"
             write_synced_csv(sensor_output, synced_sensor)
             written_files.append(sensor_output)
 
@@ -449,11 +451,11 @@ def sync_record(
             ),
         ]
     )
-    summary_output = sync_dir / "sync_summary.csv"
+    summary_output = summary_output_dir / "sync_summary.csv"
     write_synced_csv(summary_output, drift_summary)
     written_files.append(summary_output)
 
-    print(f"Synced {base_path} -> {sync_dir}")
+    print(f"Synced {base_path} -> summary: {summary_output_dir}")
     for written_file in written_files:
         print(f"  wrote {written_file}")
 
