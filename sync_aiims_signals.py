@@ -28,6 +28,7 @@ class DeviceBundle:
 @dataclass
 class RecordConfig:
     base_path: Path
+    output_base_path: Path | None
     sync_deltas: list
     ppg1_sync_boundaries: list[list[int]]
     ppg2_sync_boundaries: list[list[int]]
@@ -67,6 +68,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=FS_ECG,
         help="ECG sampling rate used by the original notebook. Default: 200 Hz.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        help=(
+            "Optional directory under which synced outputs are written. If set, each record is written to "
+            "<output_root>/<base_path_name>/sync instead of back into base_path/sync."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -112,6 +121,11 @@ def load_config_table(path: Path, delimiter: str) -> list[RecordConfig]:
         records.append(
             RecordConfig(
                 base_path=Path(str(row["base_path"])).expanduser(),
+                output_base_path=(
+                    Path(str(row["output_base_path"])).expanduser()
+                    if "output_base_path" in row and pd.notna(row["output_base_path"]) and str(row["output_base_path"]).strip()
+                    else None
+                ),
                 sync_deltas=parse_literal(row["sync_deltas"]),
                 ppg1_sync_boundaries=parse_literal(row["ppg1_sync_boundaries"]),
                 ppg2_sync_boundaries=parse_literal(row["ppg2_sync_boundaries"]),
@@ -245,14 +259,25 @@ def write_synced_csv(output_path: Path, synced_df: pd.DataFrame) -> None:
     synced_df.to_csv(output_path, index=False)
 
 
-def sync_record(record: RecordConfig, ecg_fs: float, dry_run: bool = False) -> list[Path]:
+def sync_record(
+    record: RecordConfig,
+    ecg_fs: float,
+    dry_run: bool = False,
+    output_root: Path | None = None,
+) -> list[Path]:
     base_path = record.base_path
     ecg_path, ppg1_path, ppg2_path = discover_recording_files(base_path)
 
     ecg_df = pd.read_csv(ecg_path)
     ecg_time_ns = ecg_df["time"].to_numpy(np.int64)
+    sync_parent = record.output_base_path or output_root or base_path
+    if output_root is not None and record.output_base_path is None:
+        sync_parent = output_root / base_path.name
+    sync_dir = sync_parent / "sync"
+
     if dry_run:
         print(f"[DRY RUN] {base_path}")
+        print(f"  Output: {sync_dir}")
         print(f"  ECG:  {ecg_path}")
         print(f"  PPG1: {ppg1_path}")
         print(f"  PPG2: {ppg2_path}")
@@ -276,7 +301,6 @@ def sync_record(record: RecordConfig, ecg_fs: float, dry_run: bool = False) -> l
         record.ecg_anchor_indices,
     )
 
-    sync_dir = base_path / "sync"
     sync_dir.mkdir(parents=True, exist_ok=True)
 
     written_files: list[Path] = []
@@ -429,7 +453,14 @@ def main() -> None:
     records = load_config_table(args.input_table, args.delimiter)
     all_written: list[Path] = []
     for record in records:
-        all_written.extend(sync_record(record, ecg_fs=args.ecg_fs, dry_run=args.dry_run))
+        all_written.extend(
+            sync_record(
+                record,
+                ecg_fs=args.ecg_fs,
+                dry_run=args.dry_run,
+                output_root=args.output_root,
+            )
+        )
 
     if args.dry_run:
         print(f"Validated {len(records)} record(s).")
