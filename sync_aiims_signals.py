@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence
@@ -27,6 +28,7 @@ TIME_COLUMN_CANDIDATES = (
 @dataclass
 class DeviceBundle:
     label: str
+    device_name: str
     ppg_path: Path
     files: Dict[str, Path]
     ppg_df: pd.DataFrame
@@ -198,6 +200,7 @@ def load_device_streams(device_files: Dict[str, Path], device_label: str) -> Dev
 
     return DeviceBundle(
         label=device_label,
+        device_name=device_files["ppg"].parent.name,
         ppg_path=device_files["ppg"],
         files=device_files,
         ppg_df=ppg_df,
@@ -290,7 +293,63 @@ def resolve_sync_parent(record: RecordConfig, output_root: Path | None) -> Path:
 
 def write_synced_csv(output_path: Path, synced_df: pd.DataFrame) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    synced_df.to_csv(output_path, index=False)
+    cleaned_df = synced_df.replace([np.inf, -np.inf], np.nan)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="invalid value encountered in cast",
+            category=RuntimeWarning,
+        )
+        cleaned_df.to_csv(output_path, index=False)
+
+
+def compute_sync_summary_row(
+    device: DeviceBundle,
+    device_prefix: str,
+    map_info: dict,
+    ppg_anchor_indices: Sequence[int],
+    ecg_anchor_indices: Sequence[int],
+    ecg_df: pd.DataFrame,
+    ecg_time_ns: np.ndarray,
+) -> dict:
+    ppg_time_ns = device.ppg_df["time"].to_numpy(np.int64)
+    mapped_anchor_rel = (ppg_time_ns[np.asarray(ppg_anchor_indices, dtype=int)] - map_info["t_ref_ns"]) / 1e9
+    mapped_anchor_rel = map_info["a"] * mapped_anchor_rel + map_info["b_rel"]
+    ecg_anchor_rel = (ecg_time_ns[np.asarray(ecg_anchor_indices, dtype=int)] - map_info["t_ref_ns"]) / 1e9
+    anchor_error_ms = (mapped_anchor_rel - ecg_anchor_rel) * 1e3
+
+    mapped_ppg_time_ns = np.rint((map_info["a"] * ((ppg_time_ns - map_info["t_ref_ns"]) / 1e9) + map_info["b_rel"]) * 1e9 + map_info["t_ref_ns"]).astype(np.int64)
+    overlap_start_ns = max(int(mapped_ppg_time_ns[0]), int(ecg_time_ns[0]))
+    overlap_end_ns = min(int(mapped_ppg_time_ns[-1]), int(ecg_time_ns[-1]))
+    overlap_duration_sec = max(0.0, (overlap_end_ns - overlap_start_ns) / 1e9)
+
+    ecg_duration_sec = (int(ecg_time_ns[-1]) - int(ecg_time_ns[0])) / 1e9 if len(ecg_time_ns) > 1 else 0.0
+    ppg_duration_sec = (int(ppg_time_ns[-1]) - int(ppg_time_ns[0])) / 1e9 if len(ppg_time_ns) > 1 else 0.0
+    mapped_duration_sec = (int(mapped_ppg_time_ns[-1]) - int(mapped_ppg_time_ns[0])) / 1e9 if len(mapped_ppg_time_ns) > 1 else 0.0
+
+    return {
+        "device": device_prefix,
+        "device_name": device.device_name,
+        "device_path": str(device.ppg_path.parent),
+        "ppg_source_file": device.ppg_path.name,
+        "ppg_samples": len(device.ppg_df),
+        "ecg_samples": len(ecg_df),
+        "ppg_duration_sec": ppg_duration_sec,
+        "ecg_duration_sec": ecg_duration_sec,
+        "mapped_ppg_duration_sec": mapped_duration_sec,
+        "overlap_duration_sec": overlap_duration_sec,
+        "clock_scale_a": map_info["a"],
+        "clock_offset_b_rel_sec": map_info["b_rel"],
+        "clock_drift_ppm": (map_info["a"] - 1.0) * 1e6,
+        "anchor_1_error_ms": float(anchor_error_ms[0]),
+        "anchor_2_error_ms": float(anchor_error_ms[1]),
+        "max_abs_anchor_error_ms": float(np.max(np.abs(anchor_error_ms))),
+        "ppg_anchor_1": int(ppg_anchor_indices[0]),
+        "ppg_anchor_2": int(ppg_anchor_indices[1]),
+        "ecg_anchor_1": int(ecg_anchor_indices[0]),
+        "ecg_anchor_2": int(ecg_anchor_indices[1]),
+        "sync_success": bool(overlap_duration_sec > 0 and np.all(np.isfinite(anchor_error_ms))),
+    }
 
 
 def sync_record(
@@ -370,26 +429,24 @@ def sync_record(
 
     drift_summary = pd.DataFrame(
         [
-            {
-                "device": "ppg1",
-                "clock_scale_a": map_device_1["a"],
-                "clock_offset_b_rel_sec": map_device_1["b_rel"],
-                "clock_drift_ppm": (map_device_1["a"] - 1.0) * 1e6,
-                "ppg_anchor_1": record.ppg1_anchor_indices[0],
-                "ppg_anchor_2": record.ppg1_anchor_indices[1],
-                "ecg_anchor_1": record.ecg_anchor_indices[0],
-                "ecg_anchor_2": record.ecg_anchor_indices[1],
-            },
-            {
-                "device": "ppg2",
-                "clock_scale_a": map_device_2["a"],
-                "clock_offset_b_rel_sec": map_device_2["b_rel"],
-                "clock_drift_ppm": (map_device_2["a"] - 1.0) * 1e6,
-                "ppg_anchor_1": record.ppg2_anchor_indices[0],
-                "ppg_anchor_2": record.ppg2_anchor_indices[1],
-                "ecg_anchor_1": record.ecg_anchor_indices[0],
-                "ecg_anchor_2": record.ecg_anchor_indices[1],
-            },
+            compute_sync_summary_row(
+                device=device_1,
+                device_prefix="ppg1",
+                map_info=map_device_1,
+                ppg_anchor_indices=record.ppg1_anchor_indices,
+                ecg_anchor_indices=record.ecg_anchor_indices,
+                ecg_df=ecg_df,
+                ecg_time_ns=ecg_time_ns,
+            ),
+            compute_sync_summary_row(
+                device=device_2,
+                device_prefix="ppg2",
+                map_info=map_device_2,
+                ppg_anchor_indices=record.ppg2_anchor_indices,
+                ecg_anchor_indices=record.ecg_anchor_indices,
+                ecg_df=ecg_df,
+                ecg_time_ns=ecg_time_ns,
+            ),
         ]
     )
     summary_output = sync_dir / "sync_summary.csv"
