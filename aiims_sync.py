@@ -110,10 +110,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-root",
+        "--sync-output-path",
+        dest="output_root",
         type=Path,
         help=(
             "Optional directory under which synced outputs are written. If set, each record is written to "
-            "<output_root>/<patient>/<record>/sync while preserving the original patient/record folder layout."
+            "<output_root>/<patient>/<record>/sync by default."
+        ),
+    )
+    parser.add_argument(
+        "--output-layout",
+        choices=("tail2", "full_path"),
+        default="tail2",
+        help=(
+            "How to map each base_path under --output-root: "
+            "tail2 -> <output_root>/<patient>/<record> (default), "
+            "full_path -> <output_root>/<absolute/base_path/without/leading/slash>."
         ),
     )
     parser.add_argument(
@@ -327,11 +339,18 @@ def pick_numeric_value_columns(df: pd.DataFrame) -> list[str]:
     ]
 
 
-def resolve_sync_parent(record: RecordConfig, output_root: Path | None) -> Path:
+def resolve_sync_parent(
+    record: RecordConfig,
+    output_root: Path | None,
+    output_layout: str = "tail2",
+) -> Path:
     if record.output_base_path is not None:
         return record.output_base_path
     if output_root is None:
         return record.base_path
+
+    if output_layout == "full_path":
+        return output_root / str(record.base_path).lstrip("/")
 
     tail_parts = record.base_path.parts[-2:] if len(record.base_path.parts) >= 2 else record.base_path.parts
     return output_root.joinpath(*tail_parts)
@@ -518,6 +537,7 @@ def sync_record(
     ecg_fs: float,
     dry_run: bool = False,
     output_root: Path | None = None,
+    output_layout: str = "tail2",
     graphs_dirname: str = "sync_graphs",
     accel_plot_mode: str = "both",
     accel_enmo_gravity: float = 1.0,
@@ -527,7 +547,7 @@ def sync_record(
 
     ecg_df = pd.read_csv(ecg_path)
     ecg_time_ns = ecg_df["time"].to_numpy(np.int64)
-    sync_parent = resolve_sync_parent(record, output_root)
+    sync_parent = resolve_sync_parent(record, output_root, output_layout=output_layout)
     summary_output_dir = sync_parent / "sync"
     graphs_output_dir = sync_parent / graphs_dirname
 
@@ -644,6 +664,7 @@ def main() -> None:
                 ecg_fs=args.ecg_fs,
                 dry_run=args.dry_run,
                 output_root=args.output_root,
+                output_layout=args.output_layout,
                 graphs_dirname=args.graphs_dirname,
                 accel_plot_mode=args.accel_plot_mode,
                 accel_enmo_gravity=args.accel_enmo_gravity,
