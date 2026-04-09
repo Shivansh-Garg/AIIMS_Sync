@@ -9,7 +9,7 @@ Quick run examples:
 0) How to run :
     python Sync_aiims.py sync_time.csv --delimiter "," --accel-plot-mode both \
   --sync-output-path /mnt/home/mcs242450/AIIMS_Sync/sync_AIIMS_dataset \
-  --output-layout full_path
+  --output-layout tail2
 
    reason : -- delimiter is for csv table, --accel-plot-mode both is for having both the plots of accelerometer,
    --sync-output-path is the path where the synched files will be stored, 
