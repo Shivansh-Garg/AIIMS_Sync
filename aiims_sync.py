@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+Synchronize AIIMS ECG/PPG/IMU streams and generate optional accelerometer
+"before vs after sync" plots.
+
+Quick run examples:
+1) Validate only (no files written):
+   python aiims_sync.py sync_table.tsv --dry-run
+
+2) Full sync + tri-axial before/after accelerometer plots:
+   python aiims_sync.py sync_table.tsv --accel-plot-mode tri_axial
+
+3) Full sync + vector magnitude (VM) and ENMO before/after plots:
+   python aiims_sync.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0
+
+4) Full sync + both tri-axial and VM/ENMO plots in one figure (default):
+   python aiims_sync.py sync_table.tsv --accel-plot-mode both
+"""
+
 import argparse
 import ast
 import importlib
@@ -62,9 +80,17 @@ class RecordConfig:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
         description=(
             "Sync AIIMS ECG/PPG/IMU streams using boundary indices exported from the sync notebook."
-        )
+        ),
+        epilog=(
+            "Examples:\n"
+            "  python aiims_sync.py sync_table.tsv --dry-run\n"
+            "  python aiims_sync.py sync_table.tsv --accel-plot-mode tri_axial\n"
+            "  python aiims_sync.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0\n"
+            "  python aiims_sync.py sync_table.tsv --output-root /tmp/synced_out --graphs-dirname sync_graphs"
+        ),
     )
     parser.add_argument(
         "input_table",
@@ -99,6 +125,24 @@ def parse_args() -> argparse.Namespace:
         "--graphs-dirname",
         default="sync_graphs",
         help="Folder name used under the sync parent to store generated plots. Default: sync_graphs.",
+    )
+    parser.add_argument(
+        "--accel-plot-mode",
+        choices=("tri_axial", "vm", "both"),
+        default="both",
+        help=(
+            "Accelerometer plot style for before/after sync comparison: "
+            "tri_axial (x,y,z), vm (VM + ENMO), or both. Default: both."
+        ),
+    )
+    parser.add_argument(
+        "--accel-enmo-gravity",
+        type=float,
+        default=1.0,
+        help=(
+            "Gravity value used in ENMO = max(VM - gravity, 0). "
+            "Use 1.0 for g-units or 9.81 for m/s^2. Default: 1.0."
+        ),
     )
     return parser.parse_args()
 
@@ -334,6 +378,8 @@ def save_accelerometer_before_after_plot(
     synced_accel_df: pd.DataFrame,
     graph_dir: Path,
     prefix: str,
+    plot_mode: str = "both",
+    enmo_gravity: float = 1.0,
 ) -> Path | None:
     if importlib.util.find_spec("matplotlib.pyplot") is None:
         print("Skipping accelerometer graph generation because matplotlib is not installed.")
@@ -356,23 +402,44 @@ def save_accelerometer_before_after_plot(
         synced_accel_df[synced_time_col].to_numpy(np.int64) - int(synced_accel_df[synced_time_col].iloc[0])
     ) / 1e9
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex="col")
-    axis_labels = ["X", "Y", "Z"]
-    for idx, axis_label in enumerate(axis_labels):
-        raw_col = raw_axes[idx]
-        synced_col = synced_axes[idx]
+    raw_xyz = np.column_stack([raw_accel_df[col].to_numpy(dtype=float) for col in raw_axes])
+    synced_xyz = np.column_stack([synced_accel_df[col].to_numpy(dtype=float) for col in synced_axes])
+    raw_vm = np.linalg.norm(raw_xyz, axis=1)
+    synced_vm = np.linalg.norm(synced_xyz, axis=1)
+    raw_enmo = np.maximum(raw_vm - enmo_gravity, 0.0)
+    synced_enmo = np.maximum(synced_vm - enmo_gravity, 0.0)
 
-        axes[idx, 0].plot(raw_t, raw_accel_df[raw_col].to_numpy(dtype=float), lw=0.9, color="tab:blue")
-        axes[idx, 0].set_title(f"Before sync: {axis_label} ({raw_col})")
+    rows: list[tuple[str, np.ndarray, np.ndarray]] = []
+    if plot_mode in {"tri_axial", "both"}:
+        axis_labels = ["X", "Y", "Z"]
+        for idx, axis_label in enumerate(axis_labels):
+            rows.append(
+                (
+                    f"{axis_label} ({raw_axes[idx]} -> {synced_axes[idx]})",
+                    raw_xyz[:, idx],
+                    synced_xyz[:, idx],
+                )
+            )
+    if plot_mode in {"vm", "both"}:
+        rows.append(("VM = sqrt(x² + y² + z²)", raw_vm, synced_vm))
+        rows.append((f"ENMO = max(VM - {enmo_gravity:g}, 0)", raw_enmo, synced_enmo))
+
+    fig, axes = plt.subplots(len(rows), 2, figsize=(14, max(4.0, 2.7 * len(rows))), sharex="col")
+    if len(rows) == 1:
+        axes = np.array([axes])
+
+    for idx, (label, raw_values, synced_values) in enumerate(rows):
+        axes[idx, 0].plot(raw_t, raw_values, lw=0.9, color="tab:blue")
+        axes[idx, 0].set_title(f"Before sync: {label}")
         axes[idx, 0].set_ylabel("Acceleration")
         axes[idx, 0].grid(alpha=0.2)
 
-        axes[idx, 1].plot(synced_t, synced_accel_df[synced_col].to_numpy(dtype=float), lw=0.9, color="tab:red")
-        axes[idx, 1].set_title(f"After sync: {axis_label} ({synced_col})")
+        axes[idx, 1].plot(synced_t, synced_values, lw=0.9, color="tab:red")
+        axes[idx, 1].set_title(f"After sync: {label}")
         axes[idx, 1].grid(alpha=0.2)
 
-    axes[2, 0].set_xlabel("Time since start (sec)")
-    axes[2, 1].set_xlabel("Time since start (sec)")
+    axes[-1, 0].set_xlabel("Time since start (sec)")
+    axes[-1, 1].set_xlabel("Time since start (sec)")
     fig.suptitle(f"{device.label} ({device.device_name}) accelerometer: before vs after sync", y=1.02)
     fig.tight_layout()
 
@@ -452,6 +519,8 @@ def sync_record(
     dry_run: bool = False,
     output_root: Path | None = None,
     graphs_dirname: str = "sync_graphs",
+    accel_plot_mode: str = "both",
+    accel_enmo_gravity: float = 1.0,
 ) -> list[Path]:
     base_path = record.base_path
     ecg_path, ppg1_path, ppg2_path = discover_recording_files(base_path)
@@ -525,6 +594,8 @@ def sync_record(
                     synced_accel_df=synced_sensor,
                     graph_dir=graphs_output_dir,
                     prefix=prefix,
+                    plot_mode=accel_plot_mode,
+                    enmo_gravity=accel_enmo_gravity,
                 )
                 if plot_path is not None:
                     written_files.append(plot_path)
@@ -574,6 +645,8 @@ def main() -> None:
                 dry_run=args.dry_run,
                 output_root=args.output_root,
                 graphs_dirname=args.graphs_dirname,
+                accel_plot_mode=args.accel_plot_mode,
+                accel_enmo_gravity=args.accel_enmo_gravity,
             )
         )
 
