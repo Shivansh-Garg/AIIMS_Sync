@@ -6,17 +6,26 @@ Synchronize AIIMS ECG/PPG/IMU streams and generate optional accelerometer
 "before vs after sync" plots.
 
 Quick run examples:
+0) How to run :
+    python Sync_aiims.py sync_time.csv --delimiter "," --accel-plot-mode both \
+  --sync-output-path /mnt/home/mcs242450/AIIMS_Sync/sync_AIIMS_dataset \
+  --output-layout full_path
+
+   reason : -- delimiter is for csv table, --accel-plot-mode both is for having both the plots of accelerometer,
+   --sync-output-path is the path where the synched files will be stored, 
+   --output-layout is the path format in which we want to save the file.
+
 1) Validate only (no files written):
-   python aiims_sync.py sync_table.tsv --dry-run
+   python Sync_aiims.py sync_table.tsv --dry-run
 
 2) Full sync + tri-axial before/after accelerometer plots:
-   python aiims_sync.py sync_table.tsv --accel-plot-mode tri_axial
+   python Sync_aiims.py sync_table.tsv --accel-plot-mode tri_axial
 
 3) Full sync + vector magnitude (VM) and ENMO before/after plots:
-   python aiims_sync.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0
+   python Sync_aiims.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0
 
 4) Full sync + both tri-axial and VM/ENMO plots in one figure (default):
-   python aiims_sync.py sync_table.tsv --accel-plot-mode both
+   python Sync_aiims.py sync_table.tsv --accel-plot-mode both
 """
 
 import argparse
@@ -38,11 +47,6 @@ SYNC_SENSORS = ("accelerometer", "gyroscope", "magnetometer")
 TIME_COLUMN_CANDIDATES = (
     "time",
     "timestamp",
-    "phoneTimestamp",
-    "sensorTimestampNs",
-    "sensorTimestamp",
-    "systemTimeNs",
-    "systemTime",
 )
 
 
@@ -86,10 +90,10 @@ def parse_args() -> argparse.Namespace:
         ),
         epilog=(
             "Examples:\n"
-            "  python aiims_sync.py sync_table.tsv --dry-run\n"
-            "  python aiims_sync.py sync_table.tsv --accel-plot-mode tri_axial\n"
-            "  python aiims_sync.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0\n"
-            "  python aiims_sync.py sync_table.tsv --output-root /tmp/synced_out --graphs-dirname sync_graphs"
+            "  python Sync_aiims.py sync_table.tsv --dry-run\n"
+            "  python Sync_aiims.py sync_table.tsv --accel-plot-mode tri_axial\n"
+            "  python Sync_aiims.py sync_table.tsv --accel-plot-mode vm --accel-enmo-gravity 1.0\n"
+            "  python Sync_aiims.py sync_table.tsv --output-root /tmp/synced_out --graphs-dirname sync_graphs"
         ),
     )
     parser.add_argument(
@@ -380,9 +384,8 @@ def identify_xyz_columns(df: pd.DataFrame) -> tuple[str, str, str] | None:
     lowered = {col.lower(): col for col in numeric_columns}
     axis_options = [
         ("x", "y", "z"),
-        ("accx", "accy", "accz"),
-        ("x_axis", "y_axis", "z_axis"),
-        ("axis_x", "axis_y", "axis_z"),
+        ("accelerometer_x_resampled", "accelerometer_y_resampled", "accelerometer_z_resampled"),
+        ("accelerometer_x", "accelerometer_y", "accelerometer_z"),
     ]
     for x_key, y_key, z_key in axis_options:
         if x_key in lowered and y_key in lowered and z_key in lowered:
