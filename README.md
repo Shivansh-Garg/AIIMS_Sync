@@ -217,6 +217,7 @@ R = corr(ECG_RR, PPG_PP)
 
 Offset =
 mean(ECG_peak_time_i - PPG_peak_time_i)
+```
 
 ### 8. Windowed ECG/PPG Visual Inspection
 
